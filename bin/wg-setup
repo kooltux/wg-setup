@@ -1,0 +1,447 @@
+#!/bin/bash
+
+set -e
+
+CONFDIR=/etc/wireguard
+
+CONFFILE=${WG_SETUP_CONFIG:-$CONFDIR/$(basename $BASH_SOURCE)}.conf
+
+####################################
+
+stdout_in_terminal=0
+[[ -t 1 ]] && stdout_in_terminal=1
+
+function color {
+	[[ $stdout_in_terminal == 0 ]] && return
+	for k in $*; do
+		case $k in
+			bold) tput bold 2>/dev/null;;
+			none) tput sgr0 2>/dev/null;;
+			*) tput setaf $k 2>/dev/null;;
+		esac
+	done
+}
+
+color_white=$(color bold 7)
+color_green=$(color bold 2)
+color_yellow=$(color bold 3)
+color_red=$(color bold 1)
+color_blue=$(color bold 4)
+color_gray=$(color 250)
+color_orange=$(color 214)
+color_none=$(color none)
+
+function error() {
+	echo "${color_red}$@${color_none}" >&2
+}
+
+# give caller position 
+function where() {
+	local i=${1:-1}
+	echo -n "[${FUNCNAME[$i]}@$(basename ${BASH_SOURCE[$i]}):${BASH_LINENO[$(( i - 1 ))]}]"
+}
+
+function fatal() {
+	error "$@"
+	exit 56 # why 56 ? Morbihan of course!
+}
+
+function warning() {
+	echo "${color_orange}$@${color_none}" >&2
+}
+
+function info() {
+	echo "${color_green}$@${color_none}" >&2
+}
+
+function setdebug() {
+	DEBUG=$1
+}
+	
+function debug() {
+	[[ "$DEBUG" -ge 1 ]] && {
+		echo "${color_gray}$@${color_none} $(where 2)" >&2
+	} || return 0
+}
+
+function log() {
+	echo "$@" >&2
+}
+
+# template for options parsing:
+#
+# tmp=$(getopt -o a:hv --long arg:,help,verbose -n $(basename $BASH_SOURCE) -- "$@")
+# [[ $? != 0 ]] && { usage; exit 1; }
+# eval set -- $tmp
+# while true; do
+# 	case "$1" in 
+#		-a|--arg)
+#			ARG="$2";
+#			shift 2;;
+#		-v|--verbose)
+#			VERBOSE=1;
+#			shift;
+#			break;;
+#		-h|--help)
+#			HELP=1;
+#			shift;
+#			break;;
+#		--) shift; break;;
+#		*) fatal "Internal error";;
+#	esac
+# done
+
+##########################################################################
+
+function getip() {
+	local name=$1
+	local ipaddr=$(getent hosts $name | awk '{print $1;}' | head -1)
+	[[ -z "$ipaddr" ]] && { error "Unable to resolve $name"; return 1; }
+	echo $ipaddr
+}
+
+function checkparams() {
+	info "Loading configuration filr $CONFFILE"
+	info "Checking parameters ..."
+	for x in VPN_DOMAIN VPN_SERVERNAME VPN_NET VPN_NETMASK SERVER_PUB_IPV4 SERVER_PUB_NIC SERVER_PUB_PORT SERVER_WG_NIC; do
+		[[ -z "${!x}" ]] && fatal "Invalid variable $x"
+		log "   $x = ${!x}"
+	done
+}
+
+#### config record 
+CFG_NAME=
+CFG_IP=
+CFG_TYPE=
+CFG_PRIV=
+CFG_PUB=
+
+function check_config() {
+	[[ -z "$CFG_NAME" ]] && fatal "Invalid peer name"
+
+	# solve IP address 
+	local ipaddr=$(getip $CFG_NAME.$VPN_DOMAIN)
+	[[ -z "$ipaddr" ]] && fatal "Unable to resolve peer name $CFG_NAME.$VPN_DOMAIN - check DNS entry"
+	CFG_IP=$ipaddr
+
+	case $CFG_TYPE in 
+		client|server) ;;
+		*) fatal "Invalid peer type '$type' for peer '$CFG_NAME'";;
+	esac
+
+	[[ -z "$CFG_PRIV" ]] && fatal "Invalid peer private key for peer '$CFG_NAME'"
+	[[ -z "$CFG_PUB" ]] && fatal "Invalid peer public key for peer '$CFG_NAME'"
+
+	return 0
+}
+
+function peer_exists() {
+	local name=$1
+	[[ -f peers/$name.conf ]] && return 0
+	return 1
+}
+
+function new_config() {
+	local name=$1
+	local type=${2:-client}
+
+	[[ -z "$name" ]] && fatal "Invalid name for new configuration"
+
+	CFG_NAME=$name
+	CFG_TYPE=$type
+	CFG_PRIV=$(wg genkey)
+	CFG_PUB=$(echo $CFG_PRIV | wg pubkey)
+	check_config
+}
+
+function save_config() {
+	local force=${1:-false}
+
+	check_config
+
+	mkdir -p peers/
+	$force && {
+		[[ -f peers/$CFG_NAME.conf ]] && warning "Overwriting peer config '$CFG_NAME'"
+		rm -f peers/$CFG_NAME.conf || true
+	}
+
+	[[ -f peers/$CFG_NAME.conf ]] && return 0
+
+	info "Saving peer config to peers/$CFG_NAME.conf"
+	cat <<EOF >peers/$CFG_NAME.conf
+NAME=$CFG_NAME
+TYPE=$CFG_TYPE
+PRIVKEY=$CFG_PRIV
+PUBKEY=$CFG_PUB
+EOF
+}
+
+function load_config() {
+	local name=$1
+	[[ -z "$name" ]] && fatal "Invalid name for configuration"
+	[[ ! -f peers/$name.conf ]] && fatal "Peer '$name' doesn't exist"
+
+	. peers/$name.conf
+
+	CFG_NAME=$NAME
+	CFG_TYPE=$TYPE
+	CFG_PRIV=$PRIVKEY
+	CFG_PUB=$PUBKEY
+	check_config
+}
+
+function get_config() {
+	local name=$1
+	local key=$2
+	
+	(
+		load_config $name
+		case $key in 
+		    name)    echo $CFG_NAME ;;
+			ip)      echo $CFG_IP ;;
+			type)    echo $CFG_TYPE ;;
+			privkey) echo $CFG_PRIV ;;
+			pubkey)  echo $CFG_PUB ;;
+		esac
+	)
+}
+
+############################################################
+
+init_dnsmasq() {
+	local config=/etc/dnsmasq.d/$VPN_DOMAIN.conf
+	local hosts=/etc/dnsmasq.hosts.d/$VPN_DOMAIN.hosts
+
+	[[ ! -f $config ]] && {
+		info "Generating dnsmasq config file $config"
+		cat <<EOF >$config
+domain=$VPN_DOMAIN,$VPN_NET/$VPN_NETMASK,local
+local=/$VPN_DOMAIN/
+addn-hosts=$hosts
+EOF
+	}
+
+	[[ ! -f $hosts ]] &&  {
+		info "Generating dnsmasq hosts file $hosts"
+		cat <<EOF >$hosts
+${VPN_NET/%0/1} $VPN_SERVERNAME
+EOF
+	}
+
+	chmod 644 $hosts
+	chmod 644 $config
+
+	mkdir -p dnsmasq
+	info "Creating symlinks to $config and $hosts"
+	ln -sf $config dnsmasq/
+	ln -sf $hosts dnsmasq/
+
+	info "Restarting dnsmasq..."
+	systemctl restart dnsmasq.service
+
+	## try to resolve server
+	info "Checking resolution for $VPN_SERVERNAME.$VPN_DOMAIN..."
+	local ipaddr=$(getip $VPN_SERVERNAME.$VPN_DOMAIN)
+	[[ -z "$ipaddr" ]] && {
+		error "dnsmasq setup failed"
+		journalctl -u dnsmasq
+		return 1
+	} || {
+		info "Resolution is OK."
+	}
+}
+
+##########################################################
+
+init_server() {
+	local force=${1:-false}
+	new_config $VPN_SERVERNAME server
+	save_config $force
+}
+
+gen_server_config() {
+	local output=$SERVER_WG_NIC.conf
+	info "Generating server file $output"
+
+	load_config $VPN_SERVERNAME
+
+	info "   - server $VPN_SERVERNAME"
+	cat <<EOF >$output
+############# GENERATED FILE - DONT EDIT #############
+
+[Interface]
+PrivateKey = $CFG_PRIV
+Address = $CFG_IP/$VPN_NETMASK
+ListenPort = $SERVER_PUB_PORT
+PostUp = iptables -A FORWARD -i $SERVER_WG_NIC -j ACCEPT; iptables -t nat -A POSTROUTING -o $SERVER_PUB_NIC -j MASQUERADE 
+PostDown = iptables -D FORWARD -i $SERVER_WG_NIC -j ACCEPT; iptables -t nat -D POSTROUTING -o $SERVER_PUB_NIC -j MASQUERADE
+SaveConfig = false
+EOF
+
+	local name
+	for x in peers/*.conf; do
+		name=$(basename $x)
+		name=${name/%.conf/}
+		load_config $name
+		[[ "$CFG_TYPE" != "client" ]] && continue # skip server
+		
+		info "   - peer $name"
+		
+		cat <<EOF >>$output
+	
+[Peer] # $name
+PublicKey = $CFG_PUB
+AllowedIPs = $CFG_IP/32
+EOF
+	done
+}
+
+gen_clients_config() {
+	local name output
+
+	mkdir -p clients
+
+	for x in peers/*.conf; do
+		name=$(basename $x)
+		name=${name/%.conf/}
+		load_config $name
+		[[ "$CFG_TYPE" != "client" ]] && continue # skip server
+
+		output=clients/$name.$VPN_DOMAIN.conf
+		info "Generating client file $output"
+		cat <<EOF >$output
+[Interface]
+PrivateKey = $CFG_PRIV
+Address = $CFG_IP/$VPN_NETMASK
+DNS = $(get_config $VPN_SERVERNAME ip)
+
+[Peer]
+PublicKey = $(get_config $VPN_SERVERNAME pubkey)
+Endpoint = $SERVER_PUB_IPV4:$SERVER_PUB_PORT
+AllowedIPs = $VPN_NET/$VPN_NETMASK
+EOF
+	done
+}
+
+add_client() {
+	local name=$1
+
+	peer_exists $name && fatal "Client $name already exists. Delete first."
+	new_config $name
+	save_config
+}
+
+del_client() {
+	local name=$1
+	peer_exists $name || fatal "Client $name doesn't exist."
+	rm peers/$name.conf 
+	rm -f clients/$name.$VPN_DOMAIN.conf
+}
+
+show_status() {
+	local name
+
+	load_config $VPN_SERVERNAME
+	log "server : $CFG_NAME.$VPN_DOMAIN / $CFG_IP/$VPN_NETMASK"
+
+	for x in peers/*.conf; do
+		name=$(basename $x)
+		name=${name/%.conf/}
+		load_config $name
+		[[ "$CFG_TYPE" != "client" ]] && continue # skip server
+		log "client : $CFG_NAME.$VPN_DOMAIN / $CFG_IP/$VPN_NETMASK"
+	done
+}
+
+####################################################################################"""
+
+usage() {
+	cat <<EOF >&2
+Usage: $(basename $BASH_SOURCE) <command> [options]
+
+Commands:
+	* -h|--help|help :
+		get this help
+	* init
+		initialize DNSMASQ files and restarts dnsmasq daemon
+	* server_config [-f|--force]
+		create new server configuration
+		use -f|--force to overwrite existing configuration
+	* add <name>
+		add a new client
+	* del <name>
+		delete an existing client
+	* configure
+		regenerate configuration files for server and clients
+	* status
+		dump current configuration
+
+Configuration file is sourced from $CONFFILE and can be overridden by defining
+the variable WG_SETUP_CONFIG. Example:
+WG_SETUP_CONFIG=/tmp/myfile $(baseame $BASH_SOURCE) ...
+
+A configuration file must contain the following variables (shell format):
+   VPN_DOMAIN: domain name to be used for VPN clients and server (ex: 'vpn.foo')
+   VPN_SERVERNAME: hostname for server (ex: 'server')
+   VPN_NET: network address (ex: 10.11.12.0)
+   VPN_NETMASK: network mask (ex: 24)
+   SERVER_PUB_IPV4: public IP address for server (ex: 89.90.91.92)
+   SERVER_PUB_NIC: public network interface (ex: eth0)
+   SERVER_PUB_PORT: port to reach VPN server (ex: 443)
+   SERVER_WG_NIC : the network interface to use on server side (ex: wg0)
+EOF
+
+}
+
+### load configuration from file
+
+mkdir -p $CONFDIR
+pushd $CONFDIR >/dev/null
+umask 077
+trap "popd >/dev/null" STOP INT QUIT EXIT
+
+cmd=$1
+shift || true
+case $cmd in 
+	init)
+		checkparams
+		init_dnsmasq
+		;;
+	server_config)
+		checkparams
+		opt=false
+		case $1 in 
+			-f|--force) opt=true ;;
+			"") opt=false;;
+			*) error "Invalid option '$1'"; usage; exit 1 ;;
+		esac
+		init_server $opt
+		gen_server_config
+		gen_clients_config
+		;;
+	add)
+		checkparams
+		add_client "$@"
+		gen_server_config
+		gen_clients_config
+		;;
+	del)
+		checkparams
+		del_client "$@"
+		gen_server_config
+		gen_clients_config
+		;;
+	configure)
+		checkparams
+		gen_server_config
+		gen_clients_config
+		;;
+	help|-h|--help)
+		usage
+		;;
+	*|status)
+		checkparams
+		show_status
+		;;
+esac
+
