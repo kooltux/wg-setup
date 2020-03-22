@@ -4,7 +4,7 @@ set -e
 
 CONFDIR=/etc/wireguard
 
-CONFFILE=${WG_SETUP_CONFIG:-$CONFDIR/$(basename $BASH_SOURCE)}.conf
+CONFFILE=${WG_SETUP_CONFIG:-$CONFDIR/$(basename $BASH_SOURCE).vpnconf}
 
 ####################################
 
@@ -101,12 +101,19 @@ function getip() {
 }
 
 function checkparams() {
-	info "Loading configuration filr $CONFFILE"
+	info "Loading configuration file $CONFFILE"
+	[[ ! -f $CONFFILE ]] && fatal "Invalid configuration file $CONFFILE. Variable WG_SETUP_CONFIG can be set to point the appropriate file."
+	. $CONFFILE || fatal "Invalid configuration file $CONFFILE"
+
 	info "Checking parameters ..."
 	for x in VPN_DOMAIN VPN_SERVERNAME VPN_NET VPN_NETMASK SERVER_PUB_IPV4 SERVER_PUB_NIC SERVER_PUB_PORT SERVER_WG_NIC; do
 		[[ -z "${!x}" ]] && fatal "Invalid variable $x"
 		log "   $x = ${!x}"
 	done
+
+	mkdir -p $CONFDIR/$VPN_DOMAIN
+	popd >/dev/null
+	pushd $CONFDIR/$VPN_DOMAIN >/dev/null
 }
 
 #### config record 
@@ -263,6 +270,9 @@ gen_server_config() {
 	local output=$SERVER_WG_NIC.conf
 	info "Generating server file $output"
 
+	# remove previous definitions
+	rm -f *.conf
+
 	load_config $VPN_SERVERNAME
 
 	info "   - server $VPN_SERVERNAME"
@@ -293,13 +303,19 @@ EOF
 PublicKey = $CFG_PUB
 AllowedIPs = $CFG_IP/32
 EOF
+
 	done
+
+	info "Creating server config linkj into $CONFDIR/$SERVER_WG_NIC.conf"
+	ln -sf $VPN_DOMAIN/$SERVER_WG_NIC.conf $CONFDIR/$SERVER_WG_NIC.conf
 }
 
 gen_clients_config() {
 	local name output
 
 	mkdir -p clients
+	# remove previous definitions
+	rm -f clients/*.conf
 
 	for x in peers/*.conf; do
 		name=$(basename $x)
@@ -392,8 +408,6 @@ A configuration file must contain the following variables (shell format):
 EOF
 
 }
-
-### load configuration from file
 
 mkdir -p $CONFDIR
 pushd $CONFDIR >/dev/null
