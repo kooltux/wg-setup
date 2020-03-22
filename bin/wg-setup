@@ -176,6 +176,7 @@ function save_config() {
 
 	info "Saving peer config to peers/$CFG_NAME.conf"
 	cat <<EOF >peers/$CFG_NAME.conf
+# creation date: $(date +%Y%m%d-%H%M%S)
 NAME=$CFG_NAME
 TYPE=$CFG_TYPE
 PRIVKEY=$CFG_PRIV
@@ -277,7 +278,18 @@ gen_server_config() {
 
 	info "   - server $VPN_SERVERNAME"
 	cat <<EOF >$output
-############# GENERATED FILE - DONT EDIT #############
+###########################################################
+#
+# Wireguard configuration file
+#
+# type: server
+# name: $VPN_SERVERNAME.$VPN_DOMAIN
+# IP:   $CFG_IP
+# date: $(date +%Y%m%d-%H%M%S)
+#
+#     *** This is a generated file! Don't edit!!! ***
+#
+###########################################################
 
 [Interface]
 PrivateKey = $CFG_PRIV
@@ -326,10 +338,23 @@ gen_clients_config() {
 		output=clients/$name.$VPN_DOMAIN.conf
 		info "Generating client file $output"
 		cat <<EOF >$output
+###########################################################
+#
+# Wireguard configuration file
+#
+# type: client
+# name: $name.$VPN_DOMAIN
+# IP:   $CFG_IP
+# date: $(date +%Y%m%d-%H%M%S)
+#
+#     *** This is a generated file! Don't edit!!! ***
+#
+###########################################################
+
 [Interface]
 PrivateKey = $CFG_PRIV
 Address = $CFG_IP/$VPN_NETMASK
-DNS = $(get_config $VPN_SERVERNAME ip)
+#DNS = $(get_config $VPN_SERVERNAME ip)
 
 [Peer]
 PublicKey = $(get_config $VPN_SERVERNAME pubkey)
