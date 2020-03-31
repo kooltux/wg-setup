@@ -361,6 +361,7 @@ Address = $CFG_IP/$VPN_NETMASK
 PublicKey = $(get_config $VPN_SERVERNAME pubkey)
 Endpoint = $SERVER_PUB_IPV4:$SERVER_PUB_PORT
 AllowedIPs = $VPN_NET/$VPN_NETMASK
+PersistentKeepalive = 25
 EOF
 	done
 }
