@@ -116,12 +116,31 @@ function checkparams() {
 	pushd $CONFDIR/$VPN_DOMAIN >/dev/null
 }
 
+function uniq_args() {
+	local sep=$1; shift
+	(IFS="$sep"; for x in $@;do echo $x; done) |  sort -u
+}
+
+function join_args() {
+	local sep=$1; shift
+	local excl=$1; shift
+	declare -A exval
+	for x in $(uniq_args "$sep" "$excl"); do
+		exval[$x]=true
+	done
+
+	for x in $(uniq_args "$sep" "$@"); do
+		[[ -v "exval[$x]" ]] && continue || echo -n $x${sep}
+	done | sed -e "s|${sep}\+|${sep}|g" -e "s|${sep}$||" 
+}
+
 #### config record 
 CFG_NAME=
 CFG_IP=
 CFG_TYPE=
 CFG_PRIV=
 CFG_PUB=
+CFG_SUBNETS=
 
 function check_config() {
 	[[ -z "$CFG_NAME" ]] && fatal "Invalid peer name"
@@ -139,6 +158,9 @@ function check_config() {
 	[[ -z "$CFG_PRIV" ]] && fatal "Invalid peer private key for peer '$CFG_NAME'"
 	[[ -z "$CFG_PUB" ]] && fatal "Invalid peer public key for peer '$CFG_NAME'"
 
+	# CFG_SUBNETS is optional
+
+	
 	return 0
 }
 
@@ -151,6 +173,7 @@ function peer_exists() {
 function new_config() {
 	local name=$1
 	local type=${2:-client}
+	shift 2
 
 	[[ -z "$name" ]] && fatal "Invalid name for new configuration"
 
@@ -158,6 +181,7 @@ function new_config() {
 	CFG_TYPE=$type
 	CFG_PRIV=$(wg genkey)
 	CFG_PUB=$(echo $CFG_PRIV | wg pubkey)
+	CFG_SUBNETS=$(join_args "," "" "$@") # comma separated list of remaining args
 	check_config
 }
 
@@ -181,6 +205,7 @@ NAME=$CFG_NAME
 TYPE=$CFG_TYPE
 PRIVKEY=$CFG_PRIV
 PUBKEY=$CFG_PUB
+SUBNETS=$CFG_SUBNETS
 EOF
 }
 
@@ -189,12 +214,15 @@ function load_config() {
 	[[ -z "$name" ]] && fatal "Invalid name for configuration"
 	[[ ! -f peers/$name.conf ]] && fatal "Peer '$name' doesn't exist"
 
+	unset NAME TYPE PRIVKEY PUBKEY SUBNETS
+
 	. peers/$name.conf
 
 	CFG_NAME=$NAME
 	CFG_TYPE=$TYPE
 	CFG_PRIV=$PRIVKEY
 	CFG_PUB=$PUBKEY
+	CFG_SUBNETS=$SUBNETS
 	check_config
 }
 
@@ -210,6 +238,7 @@ function get_config() {
 			type)    echo $CFG_TYPE ;;
 			privkey) echo $CFG_PRIV ;;
 			pubkey)  echo $CFG_PUB ;;
+			subnets) echo $CFG_SUBNETS ;;
 		esac
 	)
 }
@@ -276,7 +305,7 @@ gen_server_config() {
 
 	load_config $VPN_SERVERNAME
 
-	info "   - server $VPN_SERVERNAME"
+	info "   - server '$VPN_SERVERNAME' $([[ -n "$CFG_SUBNETS" ]] && echo "subnet(s): $CFG_SUBNETS")"
 	cat <<EOF >$output
 ###########################################################
 #
@@ -308,13 +337,13 @@ EOF
 		load_config $name
 		[[ "$CFG_TYPE" != "client" ]] && continue # skip server
 		
-		info "   - peer $name"
+		info "   - peer '$name' $([[ -n "$CFG_SUBNETS" ]] && echo "subnet(s): $CFG_SUBNETS")"
 		
 		cat <<EOF >>$output
 	
 [Peer] # $name
 PublicKey = $CFG_PUB
-AllowedIPs = $CFG_IP/32
+AllowedIPs = $(join_args "," "" $CFG_IP/32 "$CFG_SUBNETS")
 EOF
 
 	done
@@ -329,6 +358,14 @@ gen_clients_config() {
 	mkdir -p clients
 	# remove previous definitions
 	rm -f clients/*.conf
+
+	other_subnets=""
+	for x in peers/*.conf; do
+		name=$(basename $x)
+		name=${name/%.conf/}
+		load_config $name
+		other_subnets=$(join_args "," "" $CFG_SUBNETS $other_subnets)
+	done
 
 	for x in peers/*.conf; do
 		name=$(basename $x)
@@ -360,7 +397,7 @@ Address = $CFG_IP/$VPN_NETMASK
 [Peer]
 PublicKey = $(get_config $VPN_SERVERNAME pubkey)
 Endpoint = $SERVER_PUB_IPV4:$SERVER_PUB_PORT
-AllowedIPs = $VPN_NET/$VPN_NETMASK
+AllowedIPs = $(join_args "," "$CFG_SUBNETS" $VPN_NET/$VPN_NETMASK "$other_subnets") 
 PersistentKeepalive = 25
 EOF
 	done
@@ -368,9 +405,10 @@ EOF
 
 add_client() {
 	local name=$1
+	shift
 
 	peer_exists $name && fatal "Client $name already exists. Delete first."
-	new_config $name
+	new_config $name client "$@"
 	save_config
 }
 
@@ -410,7 +448,7 @@ Commands:
 	* server_config [-f|--force]
 		create new server configuration
 		use -f|--force to overwrite existing configuration
-	* add <name>
+	* add <name> [extra_subnets]
 		add a new client
 	* del <name>
 		delete an existing client
