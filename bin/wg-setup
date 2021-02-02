@@ -459,7 +459,7 @@ Commands:
 
 Configuration file is sourced from $CONFFILE and can be overridden by defining
 the variable WG_SETUP_CONFIG. Example:
-WG_SETUP_CONFIG=/tmp/myfile $(baseame $BASH_SOURCE) ...
+WG_SETUP_CONFIG=/tmp/myfile $(basename $BASH_SOURCE) ...
 
 A configuration file must contain the following variables (shell format):
    VPN_DOMAIN: domain name to be used for VPN clients and server (ex: 'vpn.foo')
