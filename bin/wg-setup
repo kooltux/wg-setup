@@ -1,10 +1,34 @@
 #!/bin/bash
 
+################################################################################
+# 
+# Copyright (c) 2020-2021 Stéphane Desneux <sdx@iot.bzh>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
 set -e
+
+SCRIPT=$(basename $BASH_SOURCE)
+FULLSCRIPT=$(realpath $BASH_SOURCE)
 
 CONFDIR=/etc/wireguard
 
-CONFFILE=${WG_SETUP_CONFIG:-$CONFDIR/$(basename $BASH_SOURCE).vpnconf}
+CONFFILE=${WG_SETUP_CONFIG:-$CONFDIR/$SCRIPT.vpnconf}
+
+# this script canonical url
+SELF_URL=https://raw.githubusercontent.com/kooltux/wg-setup/master/bin/$SCRIPT
 
 ####################################
 
@@ -66,6 +90,55 @@ function debug() {
 
 function log() {
 	echo "$@" >&2
+}
+
+function do_upgrade() {
+    # get remote script
+    local tempfile=$(mktemp /tmp/$SCRIPT.XXXXXXXX)
+    trap "rm -f $tempfile" STOP INT QUIT EXIT
+
+    log "Checking for upgrade ... "
+    # first, download reference script
+    case $SELF_URL in
+        http://*|https://*)
+            wget --quiet -O $tempfile $SELF_URL || { 
+				error "Unable to check for upgrade. Remote script not accessible"
+				rm -f $tempfile
+				return 0
+			}
+            ;;
+        *)
+            error "Unable to check for upgrade: invalid remote URL"
+			rm -f $tempfile
+			return 1
+            ;;
+    esac
+    local rc
+    { diff -q $FULLSCRIPT $tempfile &>/dev/null; rc=$?; } || true # don't exit on error
+
+    case $rc in
+        0)
+            info "Script $SCRIPT is up to date."
+            rm $tempfile
+            return 0
+            ;;
+        1)
+            info "a newer version of the script $SCRIPT is available."
+            ;;
+        *)
+            error "Error while checking for upgrade on script $SCRIPT"
+            rm $tempfile
+            return 1
+            ;;
+    esac
+
+	log "Upgrading script..."
+	cp -v $FULLSCRIPT ${FULLSCRIPT}.old
+	cp -v $tempfile $FULLSCRIPT
+	chmod +x $FULLSCRIPT
+	rm $tempfile
+	info "Upgraded successfully"
+	exit 0 # don't return (would cause an error on upgraded script)
 }
 
 # template for options parsing:
@@ -438,13 +511,15 @@ show_status() {
 
 usage() {
 	cat <<EOF >&2
-Usage: $(basename $BASH_SOURCE) <command> [options]
+Usage: $SCRIPT <command> [options]
 
 Commands:
 	* -h|--help|help :
 		get this help
 	* init
 		initialize DNSMASQ files and restarts dnsmasq daemon
+	* upgrade
+		upgrade the script (if possible) then exit
 	* server_config [-f|--force]
 		create new server configuration
 		use -f|--force to overwrite existing configuration
@@ -459,7 +534,7 @@ Commands:
 
 Configuration file is sourced from $CONFFILE and can be overridden by defining
 the variable WG_SETUP_CONFIG. Example:
-WG_SETUP_CONFIG=/tmp/myfile $(basename $BASH_SOURCE) ...
+WG_SETUP_CONFIG=/tmp/myfile $SCRIPT ...
 
 A configuration file must contain the following variables (shell format):
    VPN_DOMAIN: domain name to be used for VPN clients and server (ex: 'vpn.foo')
@@ -485,6 +560,10 @@ case $cmd in
 	init)
 		checkparams
 		init_dnsmasq
+		;;
+	upgrade)
+		# don't even load parameters (not needed)
+		do_upgrade
 		;;
 	server_config)
 		checkparams
@@ -518,7 +597,7 @@ case $cmd in
 	help|-h|--help)
 		usage
 		;;
-	*|status)
+	status|*)
 		checkparams
 		show_status
 		;;
