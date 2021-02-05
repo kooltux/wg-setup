@@ -397,11 +397,43 @@ gen_server_config() {
 PrivateKey = $CFG_PRIV
 Address = $CFG_IP/$VPN_NETMASK
 ListenPort = $SERVER_PUB_PORT
-PostUp = systemctl restart dnsmasq
-#PostUp = iptables -A FORWARD -i $SERVER_WG_NIC -j ACCEPT; iptables -t nat -A POSTROUTING -o $SERVER_PUB_NIC -j MASQUERADE 
-#PostDown = iptables -D FORWARD -i $SERVER_WG_NIC -j ACCEPT; iptables -t nat -D POSTROUTING -o $SERVER_PUB_NIC -j MASQUERADE
+PreUp=   for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PreUp %i   || true; done
+PostUp=  for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PostUp %i  || true; done
+PreDown= for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PreDown %i || true; done
+PostDown=for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PostDown %i|| true; done
 SaveConfig = false
 EOF
+
+	mkdir -p ${SERVER_WG_NIC}.hooks.d
+	if [[ ! -e ${SERVER_WG_NIC}.hooks.d/default ]]; then
+		cat <<EOF >${SERVER_WG_NIC}.hooks.d/default
+#!/bin/bash
+
+# reason to call this script: interface going up or down, before or after?
+STEP=\$1 
+shift
+
+# wireguard interface involved in this call: wg0, wg1, ...
+IFACE=\$1
+shift
+
+case \$STEP in
+	PreUp)
+		;;
+	PostUp)
+		systemctl restart dnsmasq
+		# iptables -A FORWARD -i \$IFACE -j ACCEPT; iptables -t nat -A POSTROUTING -o $SERVER_PUB_NIC -j MASQUERADE 
+		;;
+	PreDown)
+		# iptables -D FORWARD -i \$IFACE -j ACCEPT; iptables -t nat -D POSTROUTING -o $SERVER_PUB_NIC -j MASQUERADE
+		;;
+	PostDown)
+		;;
+	*)
+		;;
+esac
+EOF
+	fi
 
 	local name
 	for x in peers/*.conf; do
@@ -466,6 +498,10 @@ gen_clients_config() {
 PrivateKey = $CFG_PRIV
 Address = $CFG_IP/$VPN_NETMASK
 #DNS = $(get_config $VPN_SERVERNAME ip)
+PreUp=   for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PreUp %i   || true; done
+PostUp=  for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PostUp %i  || true; done
+PreDown= for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PreDown %i || true; done
+PostDown=for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PostDown %i|| true; done
 
 [Peer]
 PublicKey = $(get_config $VPN_SERVERNAME pubkey)
