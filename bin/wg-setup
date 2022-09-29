@@ -497,6 +497,11 @@ gen_clients_config() {
 [Interface]
 PrivateKey = $CFG_PRIV
 Address = $CFG_IP/$VPN_NETMASK
+
+# default MTU is 1420 but using 1280 may help on mobile networks
+# see: https://keremerkan.net/posts/wireguard-mtu-fixes/
+MTU = 1280
+
 #DNS = $(get_config $VPN_SERVERNAME ip)
 PreUp=   for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PreUp %i   || true; done
 PostUp=  for x in $PWD/%i.hooks.d/*; do [[ -f \$x ]] && /bin/bash \$x PostUp %i  || true; done
